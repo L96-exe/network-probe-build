@@ -1,26 +1,250 @@
 package jp.ishiguro.networkprobe
 
 import android.content.Context
+import android.graphics.Color
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Bundle
-import android.graphics.Color
+import android.widget.Button
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import com.google.zxing.integration.android.IntentIntegrator
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONObject
-import java.net.InetSocketAddress
-import java.net.Socket
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
 import kotlin.concurrent.thread
 
-class MainActivity:AppCompatActivity(){
- override fun onCreate(b:Bundle?){super.onCreate(b);setContentView(R.layout.activity_main);findViewById<android.widget.Button>(R.id.scan).setOnClickListener{if(isWifi()){show("NG\nWi-FiをOFFにしてください",false)}else IntentIntegrator(this).setPrompt("PC画面のQRコードを読み取ってください").setBeepEnabled(false).initiateScan()}}
- override fun onActivityResult(r:Int,c:Int,d:android.content.Intent?){val x=IntentIntegrator.parseActivityResult(r,c,d);if(x!=null){if(x.contents!=null)probe(x.contents);else show("キャンセルしました",false)}else super.onActivityResult(r,c,d)}
- private fun isWifi():Boolean{val cm=getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager;val n=cm.activeNetwork?:return false;return cm.getNetworkCapabilities(n)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)==true}
- private fun probe(s:String){show("検査中…",true);thread{try{val j=JSONObject(s);val ip=j.getString("ip");val tcp=j.getInt("tcp");val udp=j.getInt("udp");val token=j.getString("token");val exp=j.getLong("expires");if(System.currentTimeMillis()/1000>exp)throw Exception("QRコードの期限切れです")
- var tok=false;try{Socket().use{x->x.connect(InetSocketAddress(ip,tcp),5000);x.getOutputStream().write((token+"\n").toByteArray());x.getOutputStream().flush();tok=true}}catch(_:Exception){}
- var uok=false;try{DatagramSocket().use{x->val b=token.toByteArray();x.send(DatagramPacket(b,b.size,java.net.InetAddress.getByName(ip),udp));uok=true}}catch(_:Exception){}
- show("送信完了\nTCP: ${if(tok)"送信済み" else "失敗"}\nUDP: ${if(uok)"送信済み" else "失敗"}\n\n最終結果はPCに表示されます",tok||uok)}catch(e:Exception){show("NG\n${e.message}",false)}}}
- private fun show(t:String,ok:Boolean){runOnUiThread{findViewById<android.widget.TextView>(R.id.result).apply{text=t;setTextColor(if(ok)Color.rgb(20,145,80) else Color.rgb(210,45,50))}}}
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var resultText: TextView
+    private lateinit var scanButton: Button
+
+    private val barcodeLauncher =
+        registerForActivityResult(ScanContract()) { result ->
+            val contents = result.contents
+
+            if (contents == null) {
+                showResult(
+                    "読み取りをキャンセルしました",
+                    false
+                )
+            } else {
+                startProbe(contents)
+            }
+        }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+
+        resultText = findViewById(R.id.result)
+        scanButton = findViewById(R.id.scan)
+
+        scanButton.setOnClickListener {
+            if (isConnectedToWifi()) {
+                showResult(
+                    "NG\nWi-FiをOFFにしてください\n\n4Gまたは5GをONにしてから、もう一度押してください。",
+                    false
+                )
+                return@setOnClickListener
+            }
+
+            val options = ScanOptions().apply {
+                setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                setPrompt("PC画面のQRコードを読み取ってください")
+                setBeepEnabled(false)
+                setBarcodeImageEnabled(false)
+                setOrientationLocked(false)
+            }
+
+            try {
+                barcodeLauncher.launch(options)
+            } catch (e: Exception) {
+                showResult(
+                    "NG\nQRカメラを起動できませんでした\n\n${e.javaClass.simpleName}: ${e.message ?: "詳細不明"}",
+                    false
+                )
+            }
+        }
+    }
+
+    private fun isConnectedToWifi(): Boolean {
+        val connectivityManager =
+            getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+        val activeNetwork = connectivityManager.activeNetwork ?: return false
+        val capabilities =
+            connectivityManager.getNetworkCapabilities(activeNetwork) ?: return false
+
+        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+    }
+
+    private fun startProbe(qrText: String) {
+        scanButton.isEnabled = false
+        showResult("検査中…\n画面を閉じないでください", true)
+
+        thread {
+            try {
+                val json = JSONObject(qrText)
+
+                val ip = json.getString("ip")
+                val tcpPort = json.getInt("tcp")
+                val udpPort = json.getInt("udp")
+                val token = json.getString("token")
+                val expires = json.getLong("expires")
+
+                validateProbeData(
+                    ip,
+                    tcpPort,
+                    udpPort,
+                    token,
+                    expires
+                )
+
+                val tcpSuccess = sendTcp(
+                    ip,
+                    tcpPort,
+                    token
+                )
+
+                val udpSuccess = sendUdp(
+                    ip,
+                    udpPort,
+                    token
+                )
+
+                val message = buildString {
+                    append("外部検査完了\n\n")
+                    append("TCP：")
+                    append(if (tcpSuccess) "送信成功" else "NG")
+                    append("\n")
+                    append("UDP：")
+                    append(if (udpSuccess) "送信成功" else "NG")
+                    append("\n\n")
+                    append("最終的な到達判定はPC画面で確認してください。")
+                }
+
+                showResult(
+                    message,
+                    tcpSuccess || udpSuccess
+                )
+            } catch (e: Exception) {
+                showResult(
+                    "NG\n検査できませんでした\n\n${e.message ?: e.javaClass.simpleName}",
+                    false
+                )
+            } finally {
+                runOnUiThread {
+                    scanButton.isEnabled = true
+                }
+            }
+        }
+    }
+
+    private fun validateProbeData(
+        ip: String,
+        tcpPort: Int,
+        udpPort: Int,
+        token: String,
+        expires: Long
+    ) {
+        if (System.currentTimeMillis() / 1000 > expires) {
+            throw IllegalArgumentException(
+                "QRコードの有効期限が切れています。PCで新しいQRコードを表示してください。"
+            )
+        }
+
+        if (tcpPort !in 1024..65535) {
+            throw IllegalArgumentException(
+                "TCPポート番号が正しくありません。"
+            )
+        }
+
+        if (udpPort !in 1024..65535) {
+            throw IllegalArgumentException(
+                "UDPポート番号が正しくありません。"
+            )
+        }
+
+        if (token.length < 16) {
+            throw IllegalArgumentException(
+                "診断トークンが正しくありません。"
+            )
+        }
+
+        InetAddress.getByName(ip)
+    }
+
+    private fun sendTcp(
+        ip: String,
+        port: Int,
+        token: String
+    ): Boolean {
+        return try {
+            Socket().use { socket ->
+                socket.connect(
+                    InetSocketAddress(ip, port),
+                    7000
+                )
+
+                socket.soTimeout = 7000
+
+                socket.getOutputStream().bufferedWriter(Charsets.UTF_8).use { writer ->
+                    writer.write(token)
+                    writer.newLine()
+                    writer.flush()
+                }
+            }
+
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun sendUdp(
+        ip: String,
+        port: Int,
+        token: String
+    ): Boolean {
+        return try {
+            val data = token.toByteArray(Charsets.UTF_8)
+            val destination = InetAddress.getByName(ip)
+
+            DatagramSocket().use { socket ->
+                val packet = DatagramPacket(
+                    data,
+                    data.size,
+                    destination,
+                    port
+                )
+
+                socket.send(packet)
+            }
+
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun showResult(
+        message: String,
+        successColor: Boolean
+    ) {
+        runOnUiThread {
+            resultText.text = message
+            resultText.setTextColor(
+                if (successColor) {
+                    Color.rgb(20, 145, 80)
+                } else {
+                    Color.rgb(210, 45, 50)
+                }
+            )
+        }
+    }
 }
