@@ -8,8 +8,8 @@ import android.os.Bundle
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import com.google.android.gms.mlkit.barcode.GmsBarcodeScannerOptions
-import com.google.android.gms.mlkit.barcode.GmsBarcodeScanning
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import org.json.JSONObject
 import java.net.DatagramPacket
